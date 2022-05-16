@@ -76,6 +76,7 @@ private:
                 return false;
             }
         }
+        //DebugPrintf(L"%08x: %08x %08x %s\n", hWnd, dwStyle, dwExStyle, GetWindowTitle(hWnd));
         return true;
     }
 
@@ -116,6 +117,10 @@ private:
     }
     bool OnEnumWindow(HWND hWnd)
     {
+        if (!IsTaskWindow(hWnd))
+        {
+            return true;
+        }
         for (auto ti = taskList.begin(); ti != taskList.end(); ti++)
         {
             if (ti->hWnd == hWnd)
@@ -128,7 +133,6 @@ private:
                 return true;
             }
         }
-        if (IsTaskWindow(hWnd))
         {
             auto hIcon = GetWindowIcon(hWnd);
             auto title = GetWindowTitle(hWnd);
