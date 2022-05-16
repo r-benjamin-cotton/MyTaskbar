@@ -13,6 +13,7 @@
 #define IDC_MYTASKBAR                   109
 #define IDR_MAINFRAME                   128
 #define ID_CLOSE_TASK                   32771
+#define ID_OPEN_TASK                    32772
 #define IDC_STATIC                      -1
 
 // Next default values for new objects

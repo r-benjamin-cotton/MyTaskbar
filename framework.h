@@ -20,8 +20,10 @@
 
 #include <string>
 #include <vector>
-#include <list>
+//#include <list>
 #include <map>
+
+#include <functional>
 
 #pragma comment (lib, "Winmm.lib")
 
@@ -35,3 +37,5 @@
 #include <vssym32.h>
 #pragma comment (lib, "UxTheme.lib")
 
+
+#include"debug.h"

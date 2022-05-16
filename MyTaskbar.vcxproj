@@ -78,6 +78,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="com_ptr.h" />
+    <ClInclude Include="com_unk.h" />
+    <ClInclude Include="debug.h" />
+    <ClInclude Include="MyDropTarget.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="MyTaskbar.h" />
     <ClInclude Include="Resource.h" />

@@ -3,6 +3,7 @@
 
 #include "framework.h"
 #include "MyTaskbar.h"
+#include "MyDropTarget.h"
 
 #define MAX_LOADSTRING 100
 
@@ -14,11 +15,6 @@ BOOL InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 
-#if defined(_DEBUG)
-void DebugPrintf(const wchar_t* frm, ...);
-#else
-#define DebugPrintf     (void)
-#endif
 
 void FillRoundRect(Gdiplus::Graphics* graphics, const Gdiplus::Brush* brush, const Gdiplus::RectF& rect, Gdiplus::REAL percent);
 
@@ -38,7 +34,7 @@ constexpr DWORD styleEx = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_
 constexpr DWORD style = WS_POPUP;
 
 
-class MayTaskList
+class MyTaskList
 {
 public:
     struct TaskInfo
@@ -46,16 +42,20 @@ public:
         HWND hWnd;
         HICON hIcon;
         std::wstring title;
+        std::wstring path;
     };
-    std::list<TaskInfo> taskList;
+    std::vector<TaskInfo> taskList;
 
 private:
-    bool dirty;
-    std::list<TaskInfo> taskListUpdating;
+    bool dirty = false;
+    std::vector<TaskInfo> taskListUpdating;
     static bool IsTaskWindow(HWND hWnd)
     {
-        auto dwStyle = (DWORD)GetWindowLongW(hWnd, GWL_STYLE);
-        auto dwExStyle = (DWORD)GetWindowLongW(hWnd, GWL_EXSTYLE);
+        WINDOWINFO wi;
+        wi.cbSize = sizeof(wi);
+        GetWindowInfo(hWnd, &wi);
+        auto dwStyle = wi.dwStyle;// (DWORD)GetWindowLongW(hWnd, GWL_STYLE);
+        auto dwExStyle = wi.dwExStyle;// (DWORD)GetWindowLongW(hWnd, GWL_EXSTYLE);
         if ((dwStyle & WS_VISIBLE) == 0)
         {
             return false;
@@ -64,7 +64,7 @@ private:
         {
             return false;
         }
-        if ((dwStyle & WS_SYSMENU) == 0)
+        if ((dwExStyle & 0x00008000) != 0)
         {
             return false;
         }
@@ -79,6 +79,18 @@ private:
         return true;
     }
 
+    static std::wstring GetWindowProcessPath(HWND hWnd)
+    {
+        DWORD dwProcessId;
+        GetWindowThreadProcessId(hWnd, &dwProcessId);
+        auto hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, dwProcessId);
+
+        DWORD len = 4096;
+        auto str = std::vector<wchar_t>(len, '\0');
+        QueryFullProcessImageName(hProcess, 0, str.data(), &len);
+        CloseHandle(hProcess);
+        return std::wstring(str.data());
+    }
     static HICON GetWindowIcon(HWND hWnd)
     {
 #if 0
@@ -86,17 +98,10 @@ private:
         auto hIcon = LoadIcon(hInstance, IDI_APPLICATION);
 #endif
 #if 1
-        DWORD dwProcessId;
-        GetWindowThreadProcessId(hWnd, &dwProcessId);
-        auto hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, dwProcessId);
-
-        DWORD len = 1024;
-        auto str = std::vector<wchar_t>(len, '\0');
-        QueryFullProcessImageName(hProcess, 0, str.data(), &len);
+        auto path = GetWindowProcessPath(hWnd);
         SHFILEINFOW si = {};
-        SHGetFileInfoW(str.data(), 0, &si, sizeof(si), SHGFI_ICON | SHGFI_LARGEICON);
+        SHGetFileInfoW(path.c_str(), 0, &si, sizeof(si), SHGFI_ICON | SHGFI_LARGEICON);
         auto hIcon = si.hIcon;
-        CloseHandle(hProcess);
 #endif
         return hIcon;
         //return (HICON)GetClassLongPtr(hWnd, GCLP_HICON);
@@ -127,9 +132,10 @@ private:
         {
             auto hIcon = GetWindowIcon(hWnd);
             auto title = GetWindowTitle(hWnd);
+            auto path = GetWindowProcessPath(hWnd);
             if (!title.empty() || (GetClassLongPtr(hWnd, GCLP_HICON) != NULL))
             {
-                taskListUpdating.push_back(TaskInfo{ hWnd, hIcon, title });
+                taskListUpdating.push_back(TaskInfo{ hWnd, hIcon, title, path });
                 dirty = true;
                 //DebugPrintf(L"%s\n", title.c_str());
             }
@@ -138,7 +144,7 @@ private:
     }
     static BOOL CALLBACK EnumFunc(HWND hWnd, LPARAM lParam)
     {
-        auto pThis = reinterpret_cast<MayTaskList*>(lParam);
+        auto pThis = reinterpret_cast<MyTaskList*>(lParam);
         return pThis->OnEnumWindow(hWnd) ? TRUE : FALSE;
     }
 public:
@@ -188,7 +194,7 @@ private:
     SolidBrush* brushGhost = nullptr;
     Font* font = nullptr;
 
-    MayTaskList taskList;
+    MyTaskList taskList;
     int cycaption = 0;
     int cxmin = 0;
 
@@ -196,9 +202,10 @@ private:
 
     UINT_PTR timerId = 0;
     DWORD previousTickCount = 0;
-    HWND selection = NULL;
+    int selection = -1;
     bool visible = true;
     int leaving = 0;
+    int dragging = 0;
     int scanDelay = 0;
     float viewMargin = 0;
     float targetPos = 0;
@@ -208,6 +215,7 @@ private:
     float border = 0;
 
     static constexpr int LeaveCount = 300;
+    static constexpr int DragCount = 1500;
     static constexpr int ScanInterval = 300;
 
 private:
@@ -308,14 +316,26 @@ private:
         viewMargin = (windowRect.bottom - windowRect.top) * (1.0f / 8.0f);
         viewHeight = 0;
     }
-
+    void ChangeSelection(int select)
+    {
+        if (selection == select)
+        {
+            return;
+        }
+        selection = select;
+        if (dragging != 0)
+        {
+            dragging = DragCount;
+        }
+    }
     void Render()
     {
-        selection = NULL;
+        auto sel = -1;
         if (!visible)
         {
             auto colorBorder = GetThemeSysColor(NULL, COLOR_INACTIVEBORDER);
             gp->Clear(Color(128, GetRValue(colorBorder), GetGValue(colorBorder), GetBValue(colorBorder)));
+            ChangeSelection(sel);
             return;
         }
         PointF cursolPos;
@@ -353,8 +373,9 @@ private:
             }
             pointF.Y = viewMargin - scrollPos;
 #endif
-            for (const auto& taskInfo : taskList.taskList)
+            for (auto it = taskList.taskList.cbegin(), end = taskList.taskList.cend(); it != end; ++it)
             {
+                const auto& taskInfo = *it;
                 auto title = taskInfo.title;
                 if (title.empty())
                 {
@@ -369,7 +390,7 @@ private:
                 auto active = r.Contains(cursolPos);
                 if (active)
                 {
-                    selection = taskInfo.hWnd;
+                    sel = (int)std::distance(taskList.taskList.cbegin(), it);
                 }
                 auto bg = active ? brushActive : brushInactive;
                 FillRoundRect(gp, bg, r, 0.6f);
@@ -383,6 +404,7 @@ private:
             }
             viewHeight = pointF.Y + scrollPos + viewMargin;
         }
+        ChangeSelection(sel);
     }
     void Apply()
     {
@@ -421,7 +443,7 @@ private:
         BeginTimer();
         scanDelay = ScanInterval;
         leaving = 0;
-        taskList.Update();
+        UpdateTaskList();
     }
     void Leave(bool apply = true)
     {
@@ -438,7 +460,7 @@ private:
         {
             Apply();
         }
-        selection = NULL;
+        ChangeSelection(-1);
         EndTimer();
     }
     void ValidateViewPos()
@@ -472,6 +494,15 @@ private:
         Render();
         Apply();
     }
+    bool UpdateTaskList()
+    {
+        auto dirty = taskList.Update();
+        if (dirty)
+        {
+            ChangeSelection(-1);
+        }
+        return dirty;
+    }
     void OnTimer(DWORD tickCount)
     {
         auto deltaTime = tickCount - previousTickCount;
@@ -495,7 +526,7 @@ private:
             if (scanDelay <= 0)
             {
                 scanDelay = ScanInterval;
-                dirty = taskList.Update();
+                dirty = UpdateTaskList();
             }
         }
         if (leaving != 0)
@@ -505,6 +536,15 @@ private:
             {
                 leaving = 0;
                 Leave();
+            }
+        }
+        if ((dragging != 0) && (selection >= 0))
+        {
+            dragging -= (int)deltaTime;
+            if (dragging <= 0)
+            {
+                dragging = 0;
+                RaiseTarget();
             }
         }
         if (dirty)
@@ -537,6 +577,53 @@ private:
         pThis->OnTimer(tickCount);
     }
 
+    void RaiseTarget()
+    {
+        if (selection < 0)
+        {
+            return;
+        }
+        auto hWnd = taskList.taskList[selection].hWnd;
+        Leave();
+        SetForegroundWindow(hWnd);
+        if (IsIconic(hWnd))
+        {
+            ShowWindow(hWnd, SW_RESTORE);
+        }
+        else
+        {
+            BringWindowToTop(hWnd);
+        }
+    }
+    void SetupDragDrop()
+    {
+        HRESULT hr;
+        auto dt = new MyDropTarget();
+        com_ptr<IDropTarget> dropTarget = com_ptr<IDropTarget>(dt);
+        hr = RegisterDragDrop(hWnd, dropTarget);
+        dt->OnDragEnter = [=](IDataObject* pDataObj, DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) -> HRESULT
+        {
+            dragging = DragCount;
+            return S_OK;
+        };
+        dt->OnDragLeave = [=]() -> HRESULT
+        {
+            dragging = 0;
+            Leave();
+            return S_OK;
+        };
+        dt->OnDrop = [=](IDataObject* pDataObj, DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) -> HRESULT
+        {
+            dragging = 0;
+            Leave();
+            return S_OK;
+        };
+        dt->OnDragOver = [=](DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) -> HRESULT
+        {
+            OnMouseMove(pt.x, pt.y);
+            return S_OK;
+        };
+    }
 public:
     void OnDestroy()
     {
@@ -544,6 +631,7 @@ public:
         taskList.Clear();
         ReleaseGraphics();
         ReleaseBitmap();
+        RevokeDragDrop(hWnd);
         if (hMenu != NULL)
         {
             //DestroyMenu(hMenu);
@@ -554,6 +642,7 @@ public:
     void OnCreate(HWND hWnd)
     {
         this->hWnd = hWnd;
+        SetupDragDrop();
         OnSettingsChanged();
     }
     void OnSettingsChanged()
@@ -571,27 +660,30 @@ public:
     }
     void OnLButtonUp(int x, int y)
     {
-        if (selection ==NULL)
-        {
-            return;
-        }
-        auto hWnd = selection;
-        Leave();
-        SetForegroundWindow(hWnd);
-        BringWindowToTop(hWnd);
+        RaiseTarget();
     }
     void OnCloseTask()
     {
-        if (selection == NULL)
+        if (selection < 0)
         {
             return;
         }
-        PostMessage(selection, WM_CLOSE, 0, 0);
+        auto hWnd = taskList.taskList[selection].hWnd;
+        PostMessage(hWnd, WM_CLOSE, 0, 0);
+    }
+    void OnOpenTask()
+    {
+        if (selection < 0)
+        {
+            return;
+        }
+        auto& path = taskList.taskList[selection].path;
+        ShellExecuteW(hWnd, NULL, path.c_str(), NULL, NULL, SW_SHOW);
     }
     void OnContextMenu(int x, int y)
     {
 #if 1
-        if (selection == NULL)
+        if (selection < 0)
         {
             auto hCtxtMenu = GetSubMenu(hMenu, 0);
             TrackPopupMenu(hCtxtMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, x, y, 0, hWnd, NULL);
@@ -664,6 +756,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         return 0;
     }
 
+    HRESULT hr;
+    hr = OleInitialize(NULL);
+    if (FAILED(hr))
+    {
+        return 0;
+    }
+
     SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
     {
         //timeBeginPeriod(1);
@@ -709,6 +808,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     }
     GdiplusShutdown(gdiplusToken);
     CloseHandle(hMutex);
+    OleUninitialize();
     return (int) msg.wParam;
 }
 
@@ -805,6 +905,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         return DefWindowProc(hWnd, message, wParam, lParam);
     }
+    //DebugPrintf(L"%08x %08x %08x %016llx\n", hWnd, message, wParam, lParam);
     switch (message)
     {
     case WM_CREATE:
@@ -814,6 +915,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_MOUSEMOVE:
     {
+        //DebugPrintf(L"WM_MOUSEMOVE\n");
         auto pt = GetClientPos(hWnd, lParam);
         taskWindow->OnMouseMove(pt.x, pt.y);
         break;
@@ -834,7 +936,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_KILLFOCUS:
     {
         taskWindow->OnKillFocus();
-        //DebugPrintf(L"WM_KILLFOCUS");
+        //DebugPrintf(L"WM_KILLFOCUS\n");
         break;
     }
     case WM_CONTEXTMENU:
@@ -857,6 +959,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
         case ID_CLOSE_TASK:
             taskWindow->OnCloseTask();
+            break;
+        case ID_OPEN_TASK:
+            taskWindow->OnOpenTask();
             break;
         default:
             return DefWindowProc(hWnd, message, wParam, lParam);
@@ -922,17 +1027,6 @@ INT_PTR CALLBACK About(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam)
     }
     return (INT_PTR)FALSE;
 }
-#if defined(_DEBUG)
-void DebugPrintf(const wchar_t* frm, ...)
-{
-    const int count = 256;
-    wchar_t work[count];
-    va_list list;
-    va_start(list, frm);
-    _vsnwprintf_s(work, count, frm, list);
-    OutputDebugString(work);
-}
-#endif
 void FillRoundRect(Gdiplus::Graphics* gp, const Gdiplus::Brush* brush, const Gdiplus::RectF& rect, Gdiplus::REAL percent)
 {
     auto left = rect.X;

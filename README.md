@@ -12,5 +12,10 @@ See LICENCE file.
 
 ## Development environment
 ASUS ROG Flow X13 (AMD Ryzen 7 6800HS)
+
 Windows 11 Home
+
 Microsoft Visual Studio Community 2019
+
+## Link
+[https://github.com/r-benjamin-cotton/MyTaskbar](https://github.com/r-benjamin-cotton/MyTaskbar)
